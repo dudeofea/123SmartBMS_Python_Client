@@ -47,28 +47,27 @@ class SmartBMS(object):
         for i in range(10):
             self.device.char_write(RX_CHAR_WO, bytearray([0x24]))
         # Disable cell data
-        print(self.send_command("D!\r"))
+        self.send_command("D!\r")
         # Get version
-        print(self.send_command("V@\r"))
+        print("Version", self.send_command("V@\r"))
         self.get_cell_info()
 
     def get_cell_info(self):
         # Enable cell data
-        print(self.send_command("E!\r"))
-        for i in range(30):
+        self.send_command("E!\r")
+        for i in range(90):
             self.device.char_write(RX_CHAR_WO, bytearray([0x24]))
             data = self.wait_for_data()
             data_arr = data.split("_".encode())
-            if len(data_arr) != 5:
-                continue
             pkt_type = data_arr[0].decode()
-            if pkt_type == 'U':
+            pkt_len = len(data_arr)
+            if pkt_type == 'U' and pkt_len == 5:
                 # Overview
                 print("Battery Voltage:", self._parse_int(data_arr[1]) * 0.005,
                       "Solar Amps:", self._parse_int(data_arr[2]) * 0.05,
                       "Battery Amps:", self._parse_int(data_arr[3]) * 0.05,
                       "Load Amps:", self._parse_int(data_arr[4]) * 0.05)
-            elif pkt_type == 'T':
+            elif pkt_type == 'T' and pkt_len == 5:
                 # Min / max temperatures
                 print("Min Temp, Cell #%i @ %fC" % (
                     self._parse_int(data_arr[2]),
@@ -76,12 +75,28 @@ class SmartBMS(object):
                       "Max Temp, Cell #%i @ %fC" % (
                     self._parse_int(data_arr[4]),
                     self._parse_int(data_arr[3])*0.857 - 232.1))
-            elif pkt_type == 'E':
+            elif pkt_type == 'E' and pkt_len == 5:
                 # Energy counters, useless
                 pass
+            elif pkt_type == 'V' and pkt_len == 6:
+                # Min / max cell voltages
+                print("Min Voltage, Cell #%i @ %fV" % (
+                    self._parse_int(data_arr[2]),
+                    self._parse_int(data_arr[1]) * 0.005),
+                      "Max Voltage, Cell #%i @ %fV" % (
+                    self._parse_int(data_arr[4]),
+                    self._parse_int(data_arr[3]) * 0.005),
+                      "Balance Voltage: %fV" % (
+                    self._parse_int(data_arr[5]) * 0.005))
+            elif pkt_type == 'C' and pkt_len == 6:
+                # Cell voltages
+                print("Cell Voltage", data_arr)
+                print("Cell #%i Voltage: %fV" % (
+                    self._parse_int(data_arr[1]),
+                    self._parse_int(data_arr[3]) * 0.005))
             else:
-                print(data_arr)
-        print(self.send_command("D!\r"))
+                print("Unknown", data_arr)
+        self.send_command("D!\r")
 
     def send_command(self, cmd_str):
         # Try to send a command
