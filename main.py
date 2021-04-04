@@ -22,6 +22,7 @@ class SmartBMS(object):
         self.adapter.start()
         self.device = None
         self.recv_queue = queue.Queue()
+        self.cells = None
 
     def __del__(self):
         if self.device is not None:
@@ -71,13 +72,25 @@ class SmartBMS(object):
                 # Min / max temperatures
                 print("Min Temp, Cell #%i @ %fC" % (
                     self._parse_int(data_arr[2]),
-                    self._parse_int(data_arr[1])*0.857 - 232.1),
+                    self._parse_tmp(data_arr[1])),
                       "Max Temp, Cell #%i @ %fC" % (
                     self._parse_int(data_arr[4]),
-                    self._parse_int(data_arr[3])*0.857 - 232.1))
+                    self._parse_tmp(data_arr[3])))
             elif pkt_type == 'E' and pkt_len == 5:
-                # Energy counters, useless
+                # Energy counters / battery SOC
+                print("Solar Energy: %ikWh, Battery Energy: %ikWh Load Energy: %ikWh (%i%%)" % (
+                    self._parse_int(data_arr[1]) / 1000,
+                    self._parse_int(data_arr[2]) / 1000,
+                    self._parse_int(data_arr[3]) / 1000,
+                    self._parse_int(data_arr[4])))
                 pass
+            elif pkt_type == 'M' and pkt_len == 4:
+                time_str = data_arr[3].decode().split(":")
+                print("Solar Power: %iW, Load Power: %iW (%ih%im)" % (
+                    self._parse_int(data_arr[1]),
+                    self._parse_int(data_arr[2]),
+                    self._parse_int(time_str[0]),
+                    self._parse_int(time_str[1])))
             elif pkt_type == 'V' and pkt_len == 6:
                 # Min / max cell voltages
                 print("Min Voltage, Cell #%i @ %fV" % (
@@ -90,10 +103,19 @@ class SmartBMS(object):
                     self._parse_int(data_arr[5]) * 0.005))
             elif pkt_type == 'C' and pkt_len == 6:
                 # Cell voltages
-                print("Cell Voltage", data_arr)
-                print("Cell #%i Voltage: %fV" % (
-                    self._parse_int(data_arr[1]),
-                    self._parse_int(data_arr[3]) * 0.005))
+                cell_indx = self._parse_int(data_arr[1])
+                num_cells = self._parse_int(data_arr[2])
+                if self.cells is None:
+                    self.cells = [None] * num_cells
+                if cell_indx <= num_cells:
+                    cell_volts = self._parse_int(data_arr[3]) * 0.005
+                    cell_temp = self._parse_tmp(data_arr[4])
+                    self.cells[cell_indx - 1] = {
+                        'volt': cell_volts,
+                        'temp': cell_temp
+                    }
+                    print("Cell (%i/%i) Voltage: %fV, %fC" % (
+                        cell_indx, num_cells, cell_volts, cell_temp))
             else:
                 print("Unknown", data_arr)
         self.send_command("D!\r")
@@ -126,9 +148,15 @@ class SmartBMS(object):
 
     @staticmethod
     def _parse_int(input_bytes):
-        if input_bytes.decode()[0] == 'X':
+        if isinstance(input_bytes, bytearray):
+            input_bytes = input_bytes.decode()
+        if input_bytes[0] == 'X':
             return 0
         return int(input_bytes, 16)
+
+    @staticmethod
+    def _parse_tmp(input_bytes):
+        return SmartBMS._parse_int(input_bytes) * 0.857 - 232.1
 
     @staticmethod
     def _endswith(input_bytes, suffix_bytes):
