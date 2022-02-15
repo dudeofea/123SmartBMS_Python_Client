@@ -1,186 +1,175 @@
-import binascii
+import argparse
+import json
 import logging
-import pygatt
-import time
 import queue
+import sys
+import threading
+import time
 
-log = logging.getLogger('pygatt')
-log.setLevel(logging.INFO)
+from BMS import SmartBMS
+from SMS import SixFabSMS
 
-PACKET_SIZE = 20
-DEVICE_ADDR = 'EC:FE:7E:1D:09:2F'
-INFO_CHAR_RD = "99564A02-DC01-4D3C-B04E-3BB1EF0571B2"
-MODE_CHAR_RW = "A87988B9-694C-479C-900E-95DFA6C00A24"
-RX_CHAR_WO = "BF03260C-7205-4C25-AF43-93B1C299D159"
-TX_CHAR_RD = "18CDA784-4BD3-4370-85BB-BFED91EC86AF"
-RTS_CHAR_RD = "FDD6B4D3-046D-4330-BDEC-1FD0C90CB43B"
+LOG = logging.getLogger("BatteryMonitor")
+LOG.setLevel(logging.INFO)
 
-class SmartBMS(object):
-    """Class for 123SmartBMS"""
-    def __init__(self):
-        self.adapter = pygatt.GATTToolBackend()
-        self.adapter.start()
-        self.device = None
-        self.recv_queue = queue.Queue()
-        self.cells = None
+class BatteryMonitor(object):
+    def __init__(self, disable_sms, test_request, phone_filter_list):
+        self.sms = SixFabSMS(whitelist=phone_filter_list,
+                             disable_sending=disable_sms)
+        self.info_queue = queue.Queue()
 
-    def __del__(self):
-        if self.device is not None:
-            self.device.disconnect()
-        self.adapter.stop()
+        if test_request:
+            self.sms.add_test_message(test_request)
 
-    def initialize(self):
-        self._connect()
-        # Observes the given characteristics for indications.
-        # When a response is available, calls data_handle_cb
-        #self.device.subscribe(
-        #    RTS_CHAR_RD,
-        #    callback=self._data_recv_callback,
-        #    indication=True,
-        #    wait_for_response=True)
-        self.device.subscribe(
-            TX_CHAR_RD,
-            callback=self._data_recv_callback,
-            indication=True,
-            wait_for_response=True)
-        # Enable data mode
-        self.device.char_write(MODE_CHAR_RW, bytearray([0x01]))
-        for i in range(10):
-            self.device.char_write(RX_CHAR_WO, bytearray([0x24]))
-        # Disable cell data
-        self.send_command("D!\r")
-        # Get version
-        print("Version", self.send_command("V@\r"))
-        self.get_cell_info()
-
-    def get_cell_info(self):
-        # Enable cell data
-        self.send_command("E!\r")
-        for i in range(90):
-            self.device.char_write(RX_CHAR_WO, bytearray([0x24]))
-            data = self.wait_for_data()
-            data_arr = data.split("_".encode())
-            pkt_type = data_arr[0].decode()
-            pkt_len = len(data_arr)
-            if pkt_type == 'U' and pkt_len == 5:
-                # Overview
-                print("Battery Voltage:", self._parse_int(data_arr[1]) * 0.005,
-                      "Solar Amps:", self._parse_int(data_arr[2]) * 0.05,
-                      "Battery Amps:", self._parse_int(data_arr[3]) * 0.05,
-                      "Load Amps:", self._parse_int(data_arr[4]) * 0.05)
-            elif pkt_type == 'T' and pkt_len == 5:
-                # Min / max temperatures
-                print("Min Temp, Cell #%i @ %fC" % (
-                    self._parse_int(data_arr[2]),
-                    self._parse_tmp(data_arr[1])),
-                      "Max Temp, Cell #%i @ %fC" % (
-                    self._parse_int(data_arr[4]),
-                    self._parse_tmp(data_arr[3])))
-            elif pkt_type == 'E' and pkt_len == 5:
-                # Energy counters / battery SOC
-                print("Solar Energy: %ikWh, Battery Energy: %ikWh Load Energy: %ikWh (%i%%)" % (
-                    self._parse_int(data_arr[1]) / 1000,
-                    self._parse_int(data_arr[2]) / 1000,
-                    self._parse_int(data_arr[3]) / 1000,
-                    self._parse_int(data_arr[4])))
-                pass
-            elif pkt_type == 'M' and pkt_len == 4:
-                time_str = data_arr[3].decode().split(":")
-                print("Solar Power: %iW, Load Power: %iW (%ih%im)" % (
-                    self._parse_int(data_arr[1]),
-                    self._parse_int(data_arr[2]),
-                    self._parse_int(time_str[0]),
-                    self._parse_int(time_str[1])))
-            elif pkt_type == 'V' and pkt_len == 6:
-                # Min / max cell voltages
-                print("Min Voltage, Cell #%i @ %fV" % (
-                    self._parse_int(data_arr[2]),
-                    self._parse_int(data_arr[1]) * 0.005),
-                      "Max Voltage, Cell #%i @ %fV" % (
-                    self._parse_int(data_arr[4]),
-                    self._parse_int(data_arr[3]) * 0.005),
-                      "Balance Voltage: %fV" % (
-                    self._parse_int(data_arr[5]) * 0.005))
-            elif pkt_type == 'C' and pkt_len == 6:
-                # Cell voltages
-                cell_indx = self._parse_int(data_arr[1])
-                num_cells = self._parse_int(data_arr[2])
-                if self.cells is None:
-                    self.cells = [None] * num_cells
-                if cell_indx <= num_cells:
-                    cell_volts = self._parse_int(data_arr[3]) * 0.005
-                    cell_temp = self._parse_tmp(data_arr[4])
-                    self.cells[cell_indx - 1] = {
-                        'volt': cell_volts,
-                        'temp': cell_temp
-                    }
-                    print("Cell (%i/%i) Voltage: %fV, %fC" % (
-                        cell_indx, num_cells, cell_volts, cell_temp))
-            else:
-                print("Unknown", data_arr)
-        self.send_command("D!\r")
-
-    def send_command(self, cmd_str):
-        # Try to send a command
-        command = [0] * len(cmd_str)
-        for i in range(len(cmd_str)):
-            command[i] = ord(cmd_str[i])
-        #print("Sending :", bytearray(command))
-        self.device.char_write(RX_CHAR_WO, bytearray(command))
-        recv = bytearray()
-        while not self._endswith(recv, bytearray(command)):
-            self.device.char_write(RX_CHAR_WO, bytearray([0x24]))
-            recv = self.wait_for_data()
-            #print("Received:", recv)
-        return self.wait_for_data()
-
-    def wait_for_data(self):
-        last_char = ''
-        data = []
-        while True:
-            while not self.recv_queue.empty():
-                last_char = self.recv_queue.get()
-                data.append(last_char)
-                if last_char == ord('\r'):
-                    return bytearray(data)
-            #print("Waiting for queue", data)
-            time.sleep(0.1)
+    def start(self):
+        bms_thread = threading.Thread(target=self.task_get_battery_info)
+        sms_thread = threading.Thread(target=self.task_respond_to_sms)
+        bms_thread.start()
+        sms_thread.start()
+        bms_thread.join()
+        sms_thread.join()
 
     @staticmethod
-    def _parse_int(input_bytes):
-        if isinstance(input_bytes, bytearray):
-            input_bytes = input_bytes.decode()
-        if input_bytes[0] == 'X':
-            return 0
-        return int(input_bytes, 16)
-
-    @staticmethod
-    def _parse_tmp(input_bytes):
-        return SmartBMS._parse_int(input_bytes) * 0.857 - 232.1
-
-    @staticmethod
-    def _endswith(input_bytes, suffix_bytes):
-        inp_len = len(input_bytes)
-        suf_len = len(suffix_bytes)
-        if inp_len < suf_len:
-            return False
-        for i in range(suf_len):
-            if input_bytes[inp_len - suf_len + i] != suffix_bytes[i]:
+    def has_all_battery_info(battery_info):
+        required_keys = [
+            'pack_voltage', 'total_cells', 'time_hours', 'time_minutes',
+            'input_amps', 'input_watts', 'output_amps', 'output_watts',
+            'pack_soc']
+        for req in required_keys:
+            if req not in battery_info:
+                return False
+        for ind in range(1, battery_info['total_cells']):
+            if ind not in battery_info['cells']:
+                LOG.info("Missing cell %i", ind)
                 return False
         return True
 
-    def _connect(self):
+    def task_get_battery_info(self):
+        bms = SmartBMS()
+        battery_info = {
+            'cells': {}
+        }
+        running = True
+
+        while running:
+            # initialize
+            LOG.info("Initializing BMS")
+            if bms.initialize(timeout=10) is None:
+                LOG.info("Trying BMS initialization again")
+                continue
+
+            # try to get info on cells
+            LOG.info("Getting info from BMS")
+            for packet in bms.get_battery_info(timeout=20):
+                if packet['type'] != 'invalid':
+                    if packet['type'] == 'cell_info':
+                        idx = packet['contents']['cell_index']
+                        battery_info['cells'][idx] = {
+                            'temp': packet['contents']['cell_temp'],
+                            'volts': packet['contents']['cell_volts']
+                        }
+                        battery_info['total_cells'] = \
+                            packet['contents']['total_cells']
+                    else:
+                        for key, val in packet['contents'].items():
+                            battery_info[key] = val
+                if self.has_all_battery_info(battery_info):
+                    LOG.info("Got all info from battery")
+                    LOG.info(self.format_overview_request(battery_info))
+                    LOG.info(self.format_cells_request(battery_info))
+                    LOG.info(self.format_temperature_request(battery_info))
+                    running = False
+                    break
+
+        self.info_queue.put(battery_info)
+
+    def task_respond_to_sms(self):
+        battery_info = None
+        wait_time = 1.0
         while True:
-            try:
-                print("Connecting...")
-                self.device = self.adapter.connect(DEVICE_ADDR)
-                return True
-            except pygatt.exceptions.NotConnectedError:
-                time.sleep(1.0)
+            LOG.info("Initializing SMS")
+            while not self.sms.initialize():
+                time.sleep(0.5)
 
-    def _data_recv_callback(self, handle, value):
-        for character in value:
-            self.recv_queue.put(character)
+            no_error = True
+            while no_error:
+                LOG.info("Getting messages from SMS")
+                sms_requests = self.sms.get_messages()
+                if sms_requests is None:
+                    time.sleep(10.0)
+                    continue
 
-bms = SmartBMS()
-bms.initialize()
+                # wait for BMS info
+                if battery_info is None:
+                    battery_info = self.info_queue.get()
+
+                for message in sms_requests:
+                    LOG.info("Replying to %s", message['number'])
+                    message['message'] = message['message'].lower()
+
+                    if message['message'] == "overview":
+                        reply = self.format_overview_request(battery_info)
+                    elif message['message'] == "cells":
+                        reply = self.format_cells_request(battery_info)
+                    elif message['message'] == "temperature":
+                        reply = self.format_temperature_request(battery_info)
+                    else:
+                        LOG.info('Got message "%s", replying with overview',
+                                 message['message'])
+                        reply = self.format_overview_request(battery_info)
+
+                    if not self.sms.send_message(message['number'], reply):
+                        no_error = False
+                        break
+                    if not self.sms.delete_message(message['index']):
+                        no_error = False
+                        break
+
+                time.sleep(wait_time)
+                wait_time *= 2
+
+    @staticmethod
+    def format_overview_request(info):
+        f_str = "{:.1f}V, Input: {:.1f}A/{:d}W, Output: {:.1f}A/{:d}W ({:d}%)"
+        return f_str.format(info['pack_voltage'],
+                            info['input_amps'], info['input_watts'],
+                            info['output_amps'], info['output_watts'],
+                            info['pack_soc'])
+
+    @staticmethod
+    def format_cells_request(info):
+        out = "Cell Volts: ({:.3f}V - {:.3f}V)".format(
+            info['min_volt_cell']['volts'], info['max_volt_cell']['volts'])
+        for ind in info['cells']:
+            out += " {:.3f}".format(info['cells'][ind]['volts'])
+        return out
+
+    @staticmethod
+    def format_temperature_request(info):
+        out = "Temp. Celcius: ({:.1f}C - {:.1f}C)".format(
+            info['min_temp_cell']['temp'], info['max_temp_cell']['temp'])
+        for ind in info['cells']:
+            out += " {:.1f}".format(info['cells'][ind]['temp'])
+        return out
+
+def main():
+    parser = argparse.ArgumentParser(description='Run SMS Battery Monitor')
+    parser.add_argument('--no-sms-send',  action='store_true', default=False,
+                        help="Don't send any SMS, only receive (to avoid cost)")
+    parser.add_argument('--request',
+                        help="A request to process as if it were an SMS")
+    parser.add_argument('--phone-list', required=True,
+                        help="Path to a list of allowed phone numbers")
+    args = parser.parse_args()
+
+    logFormatter = logging.Formatter(
+        "%(asctime)s [%(name)-14.14s] [%(levelname)-5.5s]  %(message)s")
+    consoleHandler = logging.StreamHandler(sys.stdout)
+    consoleHandler.setFormatter(logFormatter)
+    logging.getLogger().addHandler(consoleHandler)
+
+    monitor = BatteryMonitor(args.no_sms_send, args.request, args.phone_list)
+    monitor.start()
+
+if __name__ == "__main__":
+    main()
