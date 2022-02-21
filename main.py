@@ -140,15 +140,15 @@ class BatteryMonitor(object):
     def format_cells_request(info):
         out = "Cell Volts: ({:.3f}V - {:.3f}V)".format(
             info['min_volt_cell']['volts'], info['max_volt_cell']['volts'])
-        for ind in info['cells']:
-            out += " {:.3f}".format(info['cells'][ind]['volts'])
+        for ind in sorted(info['cells'].keys()):
+            out += " {:.3f}".format(info['cells'][ind]['volts'], ind)
         return out
 
     @staticmethod
     def format_temperature_request(info):
         out = "Temp. Celcius: ({:.1f}C - {:.1f}C)".format(
             info['min_temp_cell']['temp'], info['max_temp_cell']['temp'])
-        for ind in info['cells']:
+        for ind in sorted(info['cells'].keys()):
             out += " {:.1f}".format(info['cells'][ind]['temp'])
         return out
 
