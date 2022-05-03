@@ -91,6 +91,10 @@ class BatteryMonitor(object):
             while not self.sms.initialize():
                 time.sleep(0.5)
 
+            rssi = self.sms.get_rssi()
+            if rssi:
+                LOG.info("SMS signal %ddBm", rssi)
+
             no_error = True
             while no_error:
                 LOG.info("Getting messages from SMS")

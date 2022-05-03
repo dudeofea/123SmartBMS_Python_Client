@@ -54,6 +54,43 @@ class SixFabSMS(object):
             return False
         return True
 
+    def get_rssi(self):
+        """get_rssi
+        Return the RSSI or signal strength in dBm, normally negative
+        """
+        resp = self._communicate('AT+CSQ')
+        if not resp.endswith("\r\nOK\r\n"):
+            LOG.error("Could not get RSSI: %s", resp)
+            return None
+        rssi_regex = re.compile(
+            r'\+CSQ: (\d+),(\d+)')
+        match = rssi_regex.match(resp)
+        if not match:
+            LOG.error("Could not match RSSI regex %s", resp)
+            return None
+        rssi_code = int(match.group(1))
+        error_rate = match.group(2)
+        #LOG.info("RSSI error rate code: %s", error_rate)
+
+        if rssi_code == 0:
+            return -113
+        if rssi_code == 1:
+            return -111
+        if rssi_code >= 2 and rssi_code <= 30:
+            return -109 + (rssi_code - 2) * 2
+        if rssi_code == 31:
+            return -51
+        if rssi_code == 100:
+            return -116
+        if rssi_code == 101:
+            return -115
+        if rssi_code >= 102 and rssi_code <= 190:
+            return -114 + (rssi_code - 102)
+        if rssi_code == 191:
+            return -25
+
+        return None
+
     def get_messages(self):
         """get_messages
         Return all messages with number and id. delete messages from
