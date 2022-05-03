@@ -9,6 +9,8 @@ class SixFabSMS(object):
     def __init__(self, whitelist, disable_sending=False, timeout=15):
         with open(whitelist) as myfile:
             self.whitelist = myfile.read().split('\n')
+        self.whitelist = [w for w in self.whitelist if len(w) > 0]
+        LOG.info("Whitelist: %s", str(self.whitelist))
         self.sim_serial = serial.Serial(
             "/dev/ttyUSB2", baudrate=115200, timeout=timeout)
 

@@ -117,6 +117,7 @@ class BatteryMonitor(object):
                         LOG.info('Got message "%s", replying with overview',
                                  message['message'])
                         reply = self.format_overview_request(battery_info)
+                        reply += ". Commands: overview, cells, temperature"
 
                     if not self.sms.send_message(message['number'], reply):
                         no_error = False
@@ -168,6 +169,7 @@ def main():
     consoleHandler.setFormatter(logFormatter)
     logging.getLogger().addHandler(consoleHandler)
 
+    LOG.info("### Starting Battery Monitor ###")
     monitor = BatteryMonitor(args.no_sms_send, args.request, args.phone_list)
     monitor.start()
 
